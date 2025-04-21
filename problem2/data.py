@@ -304,7 +304,6 @@ def generate_result_problem_2_6b(df: pd.DataFrame) -> pd.DataFrame:
 
         price_series = group.values
 
-
         i = 0
         revenue = 0.0
         cycles = 0
@@ -365,12 +364,15 @@ def generate_result_problem_2_6b(df: pd.DataFrame) -> pd.DataFrame:
     return result_df
 
 
-def generate_result_problem_2_7c(
+def generate_result_problem_2_7(
         df: pd.DataFrame,
-        alpha: float = 0.7,
-        up_quantile: float = 0.75,
-        down_quantile: float = 0.25,
-        position_mw: float = 100
+        alpha: float ,
+        up_quantile: float,
+        down_quantile: float,
+        position_mw: float = 100,
+        season_filter: str = None,
+        hour_filter: list = None,
+        is_weekend: bool = None
 ) -> None:
     """
     Renewable-surprise arbitrage strategy between day-ahead and intraday hourly prices.
@@ -393,70 +395,134 @@ def generate_result_problem_2_7c(
     hourly = df[list(cols.values())].resample('h').first().dropna()
     hourly = hourly[(hourly['wind_DA'] != 0) & (hourly['pv_DA'] != 0)]
 
-    # Surprise signals
+    # Add filters
+    # Season column
+    hourly['season'] = hourly.index.month % 12 // 3 + 1  # 1: Winter, 2: Spring, 3: Summer, 4: Fall
+
+    # Hour of day column
+    hourly['hour_of_day'] = hourly.index.hour
+
+    # Weekday/weekend column (True if weekend, False if weekday)
+    hourly['is_weekend'] = hourly.index.weekday >= 5  # Saturday (5) or Sunday (6)
+
+    if season_filter:
+        seasonal_map = {'Winter': 1, 'Spring': 2, 'Summer': 3, 'Fall': 4}
+        if season_filter in seasonal_map:
+            hourly = hourly[hourly['season'] == seasonal_map[season_filter]]
+
+    if hour_filter:
+        hourly = hourly[hourly['hour_of_day'].isin(hour_filter)]
+
+    if is_weekend is not None:
+        hourly = hourly[hourly['is_weekend'] == is_weekend]
+
+    # Signal logic
     hourly['S_wind'] = (hourly['wind_ID'] - hourly['wind_DA']) / hourly['wind_DA']
     hourly['S_pv'] = (hourly['pv_ID'] - hourly['pv_DA']) / hourly['pv_DA']
     hourly['S'] = alpha * hourly['S_wind'] + (1 - alpha) * hourly['S_pv']
 
+    # standardization signal scaling
+    mean_s = hourly['S'].mean()
+    std_s = hourly['S'].std()
+    hourly['S_scaled'] = (hourly['S'] - mean_s) / std_s
+
     # Signal thresholds
-    T_up = hourly['S'].quantile(up_quantile)
-    T_down = hourly['S'].quantile(down_quantile)
+    T_up = hourly['S_scaled'].quantile(up_quantile)
+    T_down = hourly['S_scaled'].quantile(down_quantile)
 
     # Trading signals
     hourly['signal'] = 0
-    hourly.loc[hourly['S'] > T_up, 'signal'] = -1
-    hourly.loc[hourly['S'] < T_down, 'signal'] = 1
+    hourly.loc[hourly['S_scaled'] > T_up, 'signal'] = -1  # short DA, buy ID
+    hourly.loc[hourly['S_scaled'] < T_down, 'signal'] = 1  # buy DA, short ID
 
-    # PnL calculation
-    hourly['pnl_per_mwh'] = (hourly['ID_price'] - hourly['DA_price']) * hourly['signal']
-    hourly['pnl_mw'] = hourly['pnl_per_mwh'] * position_mw
-    hourly['cum_pnl'] = hourly['pnl_mw'].cumsum()
+    # Position Management
+    hourly['position'] = hourly['signal'].replace(to_replace=0, method='ffill').fillna(0)
+    hourly['position_shifted'] = hourly['position'].shift(1).fillna(0)
+    hourly['position_change'] = hourly['position'] != hourly['position_shifted']
 
-    # --- Trade log ---
-    trade_log = hourly[hourly['signal'] != 0].copy()
-    trade_log = trade_log[[
-        'signal', 'pnl_per_mwh', 'pnl_mw',
-        'DA_price', 'ID_price',
-        'S_wind', 'S_pv', 'S'
-    ]]
-    trade_log.index.name = 'timestamp'
-    trade_log.reset_index(inplace=True)
+    # Trade Construction
+    trades = []
+    entry_idx = None
+    entry_price = None
+    entry_time = None
+    entry_signal = None
 
-    # Performance metrics
-    final_pnl = hourly['cum_pnl'].iloc[-1]
-    mean_pnl = hourly['pnl_mw'].mean()
-    std_pnl = hourly['pnl_mw'].std()
-    volatility = std_pnl
+    for idx, row in hourly.iterrows():
+        if row['position_change']:
+            # Exit trade
+            if entry_signal is not None and entry_signal != 0:
+                exit_time = idx
+                exit_price = row['ID_price']
+                pnl_per_mwh = (exit_price - entry_price) * entry_signal
+                trades.append({
+                    'entry_time': entry_time,
+                    'exit_time': exit_time,
+                    'signal': entry_signal,
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'trade_duration': exit_time - entry_time,
+                    'pnl_per_mwh': pnl_per_mwh,
+                    'pnl_mw': pnl_per_mwh * position_mw
+                })
+            # Start new trade
+            if row['position'] != 0:
+                entry_time = idx
+                entry_price = row['DA_price']
+                entry_signal = row['position']
+
+    # Handle open trade at the end
+    if entry_signal is not None and entry_signal != 0:
+        exit_price = hourly.iloc[-1]['ID_price']
+        exit_time = hourly.index[-1]
+        pnl_per_mwh = (exit_price - entry_price) * entry_signal
+        trades.append({
+            'entry_time': entry_time,
+            'exit_time': exit_time,
+            'signal': entry_signal,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'trade_duration': exit_time - entry_time,
+            'pnl_per_mwh': pnl_per_mwh,
+            'pnl_mw': pnl_per_mwh * position_mw
+        })
+
+    # Create trade DataFrame
+    trade_df = pd.DataFrame(trades)
+    trade_df['cum_pnl'] = trade_df['pnl_mw'].cumsum()
+
+    # Backfill cumulative PnL into hourly index
+    hourly['cum_pnl'] = np.nan
+    hourly.loc[trade_df['exit_time'], 'cum_pnl'] = trade_df['cum_pnl'].values
+    hourly['cum_pnl'] = hourly['cum_pnl'].ffill().fillna(0)
+
+    # Performance Metrics
+    final_pnl = trade_df['pnl_mw'].sum()
+    mean_pnl = trade_df['pnl_mw'].mean()
+    std_pnl = trade_df['pnl_mw'].std()
     sharpe_ratio = mean_pnl / std_pnl if std_pnl != 0 else np.nan
 
-    downside_returns = hourly.loc[hourly['pnl_mw'] < 0, 'pnl_mw']
+    downside_returns = trade_df.loc[trade_df['pnl_mw'] < 0, 'pnl_mw']
     sortino_ratio = mean_pnl / downside_returns.std() if not downside_returns.empty else np.nan
 
-    rolling_max = hourly['cum_pnl'].cummax()
-    drawdown = hourly['cum_pnl'] - rolling_max
+    rolling_max = trade_df['cum_pnl'].cummax()
+    drawdown = trade_df['cum_pnl'] - rolling_max
     max_drawdown = drawdown.min()
 
     risk_reward_ratio = abs(mean_pnl) / abs(max_drawdown) if max_drawdown != 0 else np.nan
 
-    num_trades = (hourly['signal'] != 0).sum()
-    winning_trades = (hourly['pnl_mw'] > 0).sum()
-    win_rate = winning_trades / num_trades if num_trades > 0 else np.nan
+    num_trades = len(trade_df)
+    win_rate = (trade_df['pnl_mw'] > 0).mean()
 
-    # Biggest winner and loser
-    if not hourly['pnl_mw'].empty:
-        best_trade_idx = hourly['pnl_mw'].idxmax()
-        worst_trade_idx = hourly['pnl_mw'].idxmin()
-        best_trade = hourly.loc[best_trade_idx]
-        worst_trade = hourly.loc[worst_trade_idx]
-    else:
-        best_trade = worst_trade = None
+    # Best and worst trades
+    best_trade = trade_df.loc[trade_df['pnl_mw'].idxmax()] if not trade_df.empty else None
+    worst_trade = trade_df.loc[trade_df['pnl_mw'].idxmin()] if not trade_df.empty else None
 
-    # Print summary
-    print(f"\n📈 Performance Summary:")
+    # Summary Output
+    print(f"\n Performance Summary:")
     print(f"----------------------------")
     print(f"Final Cumulative PnL   : {final_pnl:,.2f} EUR")
-    print(f"Mean Hourly PnL        : {mean_pnl:,.2f} EUR")
-    print(f"Volatility             : {volatility:,.2f} EUR")
+    print(f"Mean Trade PnL         : {mean_pnl:,.2f} EUR")
+    print(f"Volatility (Trade)     : {std_pnl:,.2f} EUR")
     print(f"Sharpe Ratio           : {sharpe_ratio:.2f}")
     print(f"Sortino Ratio          : {sortino_ratio:.2f}")
     print(f"Risk-Reward Ratio      : {risk_reward_ratio:.2f}")
@@ -466,13 +532,15 @@ def generate_result_problem_2_7c(
 
     if best_trade is not None:
         print(f"\nBest Trade:")
-        print(f"Timestamp              : {best_trade_idx}")
+        print(f"Entry                  : {best_trade['entry_time']}")
+        print(f"Exit                   : {best_trade['exit_time']}")
         print(f"Signal                 : {best_trade['signal']}")
         print(f"PnL                    : {best_trade['pnl_mw']:,.2f} EUR")
 
     if worst_trade is not None:
         print(f"\nWorst Trade:")
-        print(f"Timestamp              : {worst_trade_idx}")
+        print(f"Entry                  : {worst_trade['entry_time']}")
+        print(f"Exit                   : {worst_trade['exit_time']}")
         print(f"Signal                 : {worst_trade['signal']}")
         print(f"PnL                    : {worst_trade['pnl_mw']:,.2f} EUR")
 
@@ -480,11 +548,11 @@ def generate_result_problem_2_7c(
         plt.figure(figsize=(12, 6))
         plt.plot(hourly.index, hourly['cum_pnl'], label='Cumulative PnL', linewidth=2, color='blue')
 
-        # Mark best and worst trades
         if best_trade is not None:
-            plt.scatter(best_trade_idx, best_trade['cum_pnl'], color='green', label='Best Trade', zorder=5)
+            plt.axvspan(best_trade['entry_time'], best_trade['exit_time'], color='green', alpha=0.2, label='Best Trade')
         if worst_trade is not None:
-            plt.scatter(worst_trade_idx, worst_trade['cum_pnl'], color='red', label='Worst Trade', zorder=5)
+            plt.axvspan(worst_trade['entry_time'], worst_trade['exit_time'], color='red', alpha=0.2,
+                        label='Worst Trade')
 
         # Highlight +1 (buy) signal regions in green
         buy_signals = hourly['signal'] == 1
@@ -504,12 +572,12 @@ def generate_result_problem_2_7c(
         plt.tight_layout()
         plt.show()
 
-
-        print(trade_log)
+        # Trade Log
+        print("\n📜 Trade Log (Sample):")
+        print(trade_df.head(10))
 
 if __name__ == "__main__":
     df = load_data()
-
 
     generate_result_problem_2_1(df)
     generate_result_problem_2_2(df)
@@ -519,7 +587,8 @@ if __name__ == "__main__":
     generate_result_problem_2_6a(df)
     generate_result_problem_2_6b(df)
 
-    generate_result_problem_2_7c(df)
-
-
-
+    # season_filter = ["Winter":(1,3), "Spring":(4,6), "Summer":(7,9), "Fall":(10,12)  ]
+    # alpha -> weighting factor for Wind/PV ratio
+    generate_result_problem_2_7(df,0.9, 0.75, 0.25,
+                                 season_filter="Fall", hour_filter=[5,6,7,8,9,10,11,12,13,14,15,16,17,18],
+                                 is_weekend=True)
