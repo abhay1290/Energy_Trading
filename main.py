@@ -19,6 +19,15 @@ class PnLResponse(BaseModel):
     unit: str = "euro"
     capture_time: str
 
+# Steps to start the server with API Endpoints ->
+# 1. open terminal and paste this -> uvicorn main:app --reload --port 8000
+# 2. ensure uvicorn is installed
+# 3. server has been started on this URl -> http://127.0.0.1:8000
+# 4. copy, paste link in the browser ad go to API docs -> http://127.0.0.1:8000/docs
+# 5. Here you should 2 API endpoints to play around
+# 6. once done, return back to the terminal and press ctrl + c to terminate the session
+# if any issues contact dev @ abhay.karol@essec.edu :)
+
 # API endpoint to get PnL for a specific strategy
 @app.get(
     "/v1/pnl/{strategy_id}",

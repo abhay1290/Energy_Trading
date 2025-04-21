@@ -132,6 +132,21 @@ def generate_result_problem_2_3(df: pd.DataFrame()):
     print(
         f"Task 2.3:\n Wind owner avg = {avg_wind_val:.2f} €/MWh\n PV owner avg  = {avg_pv_val:.2f} €/MWh\n Overall DA avg price = {da_price.mean():.2f} €/MWh\n")
 
+    explanation = """
+    Merit-order effect:
+    High wind/solar generation often occurs when demand is low → prices are low.
+    More renewables in the system → lower prices (especially during high wind/sun hours).
+
+    Concentration of generation:
+    Wind tends to peak at night/off-peak → lower prices.
+    Solar peaks midday when prices might not be at their highest (especially in summer).
+
+    Forecast correlation:
+    Since we use forecasts to compute the value, systematic bias or overestimation during low-price periods can reduce the weighted average.
+    """
+
+    print(explanation)
+
 
 def generate_result_problem_2_4(df: pd.DataFrame()):
     # 2.4 High/low renewable days
@@ -150,6 +165,18 @@ def generate_result_problem_2_4(df: pd.DataFrame()):
         f" Highest renewables {max_day}: {daily_prod.loc[max_day, 'total_MWh']:.0f} MWh, avg DA price {daily_da_price.loc[max_day]:.2f} €/MWh")
     print(
         f" Lowest  renewables {min_day}: {daily_prod.loc[min_day, 'total_MWh']:.0f} MWh, avg DA price {daily_da_price.loc[min_day]:.2f} €/MWh\n")
+
+    explanation = """
+    Why is the DA price low on the max renewable day?
+    High supply of wind and solar → pushes prices down (especially during low demand periods).
+    Merit-order effect: Renewables have near-zero marginal cost → displace expensive generation.
+    
+    Why is the DA price high on the low renewable day?
+    Low renewable availability → system relies on fossil/nuclear generation → higher marginal costs.
+    Possibly correlated with high demand, weather issues, or fuel price spikes.
+    """
+
+    print(explanation)
 
     plt.figure(figsize=(14, 6))
     ax1 = plt.gca()
@@ -189,6 +216,20 @@ def generate_result_problem_2_5(df: pd.DataFrame):
 
     weekday_avg_price = hourly[hourly['is_weekday']].groupby('hour')['Day Ahead Price hourly [in EUR/MWh]'].mean()
     weekend_avg_price = hourly[~hourly['is_weekday']].groupby('hour')['Day Ahead Price hourly [in EUR/MWh]'].mean()
+
+    explanation = """
+    Average hourly day-ahead (DA) prices typically differ between weekdays and weekends due to variations in demand and supply:
+
+    - Weekday prices tend to be higher because of stronger industrial and commercial electricity demand.
+    - Weekend prices are usually lower as demand drops and renewables often make up a larger share of generation.
+
+    However, exceptions occur due to factors like:
+    - Weather-dependent renewable availability
+    - Generation outages or fuel supply issues
+    - Demand spikes from heating or cooling
+    """
+
+    print(explanation)
 
     plt.figure(figsize=(12, 6))
     plt.plot(weekday_avg_price.index, weekday_avg_price, label='Weekday Avg Price', color='blue', linewidth=2)
@@ -378,6 +419,7 @@ def generate_result_problem_2_7(
     Renewable-surprise arbitrage strategy between day-ahead and intraday hourly prices.
     Computes signals from forecast differences, trades based on quantiles,
     calculates detailed PnL and performance metrics, and plots results.
+    Filtering available based on seasonality, hours and weekday/weekend
     """
 
     # Rename columns using exact sheet headers
@@ -573,7 +615,7 @@ def generate_result_problem_2_7(
         plt.show()
 
         # Trade Log
-        print("\n📜 Trade Log (Sample):")
+        print("\n Trade Log (Sample):")
         print(trade_df.head(10))
 
 if __name__ == "__main__":
@@ -591,4 +633,10 @@ if __name__ == "__main__":
     # alpha -> weighting factor for Wind/PV ratio
     generate_result_problem_2_7(df,0.9, 0.75, 0.25,
                                  season_filter="Fall", hour_filter=[5,6,7,8,9,10,11,12,13,14,15,16,17,18],
-                                 is_weekend=True)
+                                 is_weekend=None)
+
+
+    # we can play around with the parameters(alpha, quantiles, seasonality, hourly trend, weekday/weekend) here.
+    # also can use an optimizer func, that tries different combinations of input to optimize
+    # any particular metric eg maximize profit, maximize sharpe ratio, minimize volatility etc
+
